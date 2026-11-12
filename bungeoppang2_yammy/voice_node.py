@@ -8,7 +8,7 @@
   pip install faster-whisper sounddevice numpy --break-system-packages
   sudo apt install -y libportaudio2
 
-실행:  ros2 run bungeoppang2 voice_node
+실행:  ros2 run bungeoppang2 voice_node   (말 + 이 창에 문장 입력 둘 다 가능)
 마이크 선택:  python3 -c "import sounddevice; print(sounddevice.query_devices())" 로 번호 확인 후
              아래 MIC_DEVICE에 번호 입력 (None = 기본 마이크)
 """
@@ -38,7 +38,7 @@ DECODE = dict(language="ko", beam_size=5, initial_prompt=None,
 # ---- 주문 해석기 (예전 voice_order 노드의 강화판 이식) ----
 # 발음 변형, 여러 종류 동시 주문("팥 둘, 슈크림 하나"), 빼기("슈크림은 빼고"), "~씩" 지원
 FILL_TABLE = sorted([(w, k) for k, ws in [
-    ("슈크림", ["슈크림", "수크림", "슈크린", "쓔크림", "치크림", "시크림", "쉬크림", "슈그림", "슈붕", "슈봉", "수붕", "수봉", "쓔붕", "슈뿡", "커스터드", "크림"]),
+    ("슈크림", ["슈크림", "수크림", "슈크린", "쓔크림", "치크림", "시크림", "쉬크림", "슈그림", "슈붕", "슈봉", "수붕", "수봉", "쓔붕", "슈뿡", "커스터드", "크림", "슈"]),
     ("팥", ["팥붕", "팥봉", "팟붕", "팟봉", "밭붕", "단팥", "팥소", "팥", "팟", "팝", "밭", "팍", "판", "파앗"]),
 ] for w in ws], key=lambda x: -len(x[0]))
 NUM = {"하나": 1, "한": 1, "둘": 2, "두": 2, "셋": 3, "세": 3, "석": 3,
@@ -233,20 +233,34 @@ class TextOrderNode(Node):
                                  lambda m: setattr(self, "listening", m.data), 10)
 
     def submit(self, text):
-        text = text.strip()
-        if not text:
-            return
-        if not self.listening:
-            print("   (지금은 굽는 중이라 주문을 안 받아요 — 끝나면 다시 입력하세요)")
-            return
-        self.get_logger().info(f"⌨ 입력: {text}")
-        self.text_pub.publish(String(data=text))
-        order = parse_order(text)
-        if order:
-            self.get_logger().info(f"🧾 주문: {order}")
-            self.order_pub.publish(String(data=order))
-        else:
-            self.get_logger().info("   주문으로 해석 안 됨 → 도리도리 (예: '팥 두 개 주세요', '슈붕 하나')")
+        submit_text(self, text)
+
+
+def submit_text(node, text):
+    """키보드로 친 문장을 말로 한 것과 똑같이 발행 (voice_node·text_order 공용)"""
+    text = text.strip()
+    if not text:
+        return
+    if not node.listening:
+        print("   (지금은 굽는 중이라 주문을 안 받아요 — 끝나면 다시 입력하세요)")
+        return
+    node.get_logger().info(f"⌨ 입력: {text}")
+    node.text_pub.publish(String(data=text))
+    order = parse_order(text)
+    if order:
+        node.get_logger().info(f"🧾 주문: {order}")
+        node.order_pub.publish(String(data=order))
+    else:
+        node.get_logger().info("   주문으로 해석 안 됨 → 도리도리 (예: '팥 두 개 주세요', '슈붕 하나')")
+
+
+def _keyboard_loop(node):
+    """마이크와 함께 쓰는 키보드 입력 (Enter로 보냄)"""
+    try:
+        while rclpy.ok():
+            submit_text(node, input())
+    except (EOFError, KeyboardInterrupt):
+        pass
 
 
 def main_text(args=None):
@@ -266,15 +280,30 @@ def main_text(args=None):
 
 
 def main(args=None):
+    """음성 + 텍스트 동시: 마이크로 말해도 되고, 이 창에 문장을 치고 Enter 해도 돼요.
+    마이크/Whisper가 안 되면 텍스트만으로 계속 받아요."""
+    import threading
     rclpy.init(args=args)
-    node = VoiceNode()
+    voice = True
+    try:
+        node = VoiceNode()
+    except Exception as e:                       # 마이크 없음, faster-whisper 미설치 등
+        voice = False
+        node = TextOrderNode()
+        node.get_logger().warning(f"음성 인식을 못 켰어요({e}) → 텍스트로만 주문 받아요")
+    threading.Thread(target=_keyboard_loop, args=(node,), daemon=True).start()
+    print(("🎤 말로 주문하거나, " if voice else "") +
+          "⌨ 이 창에 문장을 입력하고 Enter (예: 팥 하나 슈크림 하나 주세요). 종료: Ctrl+C", flush=True)
     try:
         rclpy.spin(node)
+    except Exception:                            # Ctrl+C·창 닫기로 ROS가 먼저 꺼져도 조용히 종료
+        pass
     except KeyboardInterrupt:
         pass
-    node.stream.stop()
+    if voice:
+        node.stream.stop()
     node.destroy_node()
-    rclpy.shutdown()
+    rclpy.try_shutdown()
 
 
 if __name__ == "__main__":

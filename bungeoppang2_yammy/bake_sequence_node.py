@@ -7,9 +7,11 @@
             입구를 틀 쪽(아래)으로 → 틀 위 2cm → 조여서(짜며) 아래→위로 →
             입구 다시 위로 → 제자리
   2차 반죽: 1차와 같고 기울인 채 1초
-  뚜껑 닫기: 열린 뚜껑의 손잡이 가로 중앙 잡기 → 경첩 호 180→0도 (밑판에 맞닿게)
-  10초 → 뒤집기: 겹친 손잡이(4cm)를 잡고 +30cm → 180도 → -30cm → 10초 → 풀고 X로 5cm
-  뚜껑 열기: 끈 고리 잡고 당기기 (판이 평평해질 때까지)
+  (반죽·소스는 먼 판(마주보는 틀)에 — positions.POUR_PLATE)
+  뚜껑 닫기: 가까운 판 손잡이를 옆에서 잡고 경첩 호 180→0도 (먼 판 위에 덮음) → 그 자리에서 손만 벌림
+  밑면 익기 10초 (손은 그 자리) → 뒤집기: 겹친 갈색 손잡이를 잡고 +20cm → x축(손잡이 축) 180도 → 로봇 쪽 5cm
+  → -20cm → 잡은 채 10초 → 바닥에서 x축 180도 되돌리기(손잡이가 반원으로 오르내림) → 한 번 더 180도 → 로봇 쪽 5cm
+  → 뚜껑 열기: 위 갈색 손잡이 양옆을 잡고 0→90도 세움 → 바깥쪽에서 다시 잡고 90→175도 눕힘
 
 값 수정: grip_params.py(힘·폭) / positions.py(위치·각도·시간)
 
@@ -89,7 +91,27 @@ def main(args=None):
         if err > P.REACH_TOL:
             raise ValueError(f"[도달 실패] {label}: 목표와 {err:.0f}mm 차이 "
                              f"(목표 {[round(v) for v in pose[:3]]}, 실제 {[round(v) for v in got[:3]]}) "
-                             "→ 로봇이 이 자세로 갈 수 없어요. positions.py에서 위치를 조정하세요")
+                             + _joint_hint())
+
+    def _joint_hint():
+        """도달 실패 원인 힌트: 관절이 한계(±360°)에 걸렸는지 먼저 확인"""
+        try:
+            j = list(get_current_posj())
+        except Exception:
+            return "→ 로봇이 이 자세로 갈 수 없어요. positions.py에서 위치를 조정하세요"
+        over = [f"J{i+1}={v:.0f}°" for i, v in enumerate(j) if abs(v) > P.J_WOUND_WARN]
+        if over:
+            return (f"→ 관절이 한계(±360°) 근처까지 감겨 있어요 ({', '.join(over)}). 위치 문제가 아니에요. "
+                    "티치펜던트에서 알람 리셋 후 그 관절을 0° 쪽으로 조그하세요")
+        return f"(관절 {[round(v) for v in j]}) → 로봇이 이 자세로 갈 수 없어요. positions.py에서 위치를 조정하세요"
+
+    def unwind_if_wound(label):
+        """빈손일 때만 호출: J4가 많이 감겨 있으면 홈(J4=0)으로 갔다 와서 풀기.
+        (붓기·짜기 동안 J4가 +360° 가까이 누적돼 다음 직선 이동에서 한계를 넘었음)"""
+        j = list(get_current_posj())
+        if abs(j[3]) > P.J4_UNWIND_DEG:
+            confirm(f"{label}: J4가 {j[3]:.0f}° 감겨 있어 빈손으로 홈에 가서 풀기")
+            home()
 
     def go_rel_j6(deg, vel=None):
         j = list(get_current_posj())
@@ -268,7 +290,7 @@ def main(args=None):
         """비커 손잡이를 옆에서 잡아 들고 → 각 틀의 노란 칸 위에 주둥이를 대고 25° 기울여 붓기.
         틀마다 손잡이·소스통을 피하는 방향을 자동으로 골라요 (positions.plan_pour)."""
         K = P.KETTLE_PICK
-        plans = [(i, *P.plan_pour(grip)) for i, grip in molds]
+        plans = P.plan_pours(molds)          # 틀마다 그리퍼가 팔의 같은 쪽 → J4 안 감김
         pick(K, G.KETTLE_OPEN_WIDTH, G.KETTLE_GRIP_WIDTH, G.KETTLE_GRIP_CURRENT,
              "비커 손잡이", obj="kettle", side=P.CUP_APPROACH)
         up = cur(); up[2] = P.OBJ_TRANSIT_Z
@@ -312,7 +334,7 @@ def main(args=None):
         for i, grip in molds:
             md = P.tool_dir(grip)
             tip = P.tool_tip(grip)
-            c = [tip[k] + md[k] * (P.HANDLE_STICK + P.MOLD_W / 2) for k in range(2)]
+            c = [tip[k] + md[k] * P.plate_k() for k in range(2)]   # 먼 판(마주보는 틀) 가운데
             # 판 위에서는 그리퍼를 판 중앙 방향과 90°로 '비켜' 두어야 팔이 덜 접혀요
             ang = math.degrees(math.atan2(c[1], c[0]))
             a = min((ang + 90.0, ang - 90.0),
@@ -342,148 +364,189 @@ def main(args=None):
         move_jx(back, "제자리 위로 (1축 회전)")
         place(bottle, G.SAUCE_OPEN_WIDTH, f"{kind} 소스통")
 
-    # ---------------- 뚜껑 (경첩 호) ----------------
-    def lid_point(phi_deg, mold_short):
-        phi = math.radians(phi_deg)
-        s = P.LID_OPEN_SIGN
-        hinge = P.pose_to(P.HINGE_FWD, mold_short, P.HINGE_Z)
-        pt = offset_tool(hinge, -s * math.cos(phi) * P.LID_R)
-        pt[2] = P.HINGE_Z + math.sin(phi) * P.LID_R
-        a = hinge[3] if s > 0 else (hinge[3] + 180.0) - (360.0 if hinge[3] + 180.0 > 180.0 else 0.0)
-        return [pt[0], pt[1], pt[2], a, 90.0 + phi_deg, 90.0]
-
-    def close_lid(i, mold_short):
-        """열린 뚜껑(먼 쪽 손잡이)을 옆에서 잡고, 경첩을 중심으로 호를 그리며 닫기.
-        그리퍼 축이 경첩 축과 나란해서 뚜껑이 도는 만큼 손목(J6)이 같이 굴러요."""
-        pick(P.lid_side_grip(180.0, mold_short), G.HANDLE_OPEN_WIDTH, G.HANDLE_GRIP_WIDTH,
-             G.HANDLE_GRIP_CURRENT, f"{i+1}번 틀: 열린 뚜껑(먼 쪽) 손잡이 옆에서",
-             back=P.LID_APPROACH_BACK)
-        confirm(f"{i+1}번 뚜껑 닫기 (180° → {P.LID_RELEASE_DEG:.0f}°, 나머지는 놓으면 내려앉음)")
-        span = 180.0 - P.LID_RELEASE_DEG
-        n = max(1, int(round(span / P.LID_STEP_DEG)))
+    # ---------------- 뚜껑 닫기·뒤집기·열기 (1·2번 틀 각자의 손잡이를 옆에서 잡기) ----------------
+    def lid_arc(mi, t0, t1, label, z0=0.0, z1=0.0):
+        n = max(1, int(round(abs(t1 - t0) / P.LID_STEP_DEG)))
         for k in range(1, n + 1):
-            phi = 180.0 - span * k / n
-            move_l(P.lid_side_grip(phi, mold_short), f"닫기 {phi:.0f}°", vel=P.VEL_SLOW_L)
-        gripper.move(G.HANDLE_OPEN_WIDTH, wait=0.3)
-        out = offset_tool(cur(), -P.LID_APPROACH_BACK)  # 손잡이에서 옆으로 빼기
-        move_l(out, "손잡이에서 옆으로 빠지기", vel=P.VEL_SLOW_L)
-        up_ = cur(); up_[2] += P.RETREAT_UP
-        move_l(up_, "뚜껑에서 위로 빠지기")
+            t = t0 + (t1 - t0) * k / n
+            move_l(P.side_lid_pose(t, z0 + (z1 - z0) * k / n, mi), f"{label} {t:.0f}°", vel=P.VEL_SLOW_L)
 
-    def open_lid(i, mold_short):
-        """닫힌 뚜껑의 위 손잡이를 옆에서 잡고, 닫기의 반대로 호를 그리며 180°까지 활짝 열기.
-        (예전 끈 당기기 방식은 15~30°에서 팔이 너무 접혀 정지)
-        닫힌 상태에선 아래 손가락이 위·아래 손잡이 사이 틈으로 들어가야 해서 조금만 벌려요."""
-        w = P.LID_CLOSED_OPEN_WIDTH
-        if w < P.HANDLE_T + 4.0:
-            raise ValueError(f"[안전 정지] {i+1}번 뚜껑 열기: 손잡이 사이 틈이 손가락(FINGER_T {P.FINGER_T:.0f}mm)보다 좁아요 "
-                             f"(벌릴 수 있는 폭 {w:.0f}mm) → 손잡이 간격을 넓히거나 FINGER_T를 실측해 주세요")
-        pick(P.lid_side_grip(0.0, mold_short), w, G.HANDLE_GRIP_WIDTH,
-             G.HANDLE_GRIP_CURRENT, f"{i+1}번 틀: 닫힌 뚜껑 위 손잡이 옆에서 (그리퍼 {w:.0f}mm만 벌림)",
-             back=P.LID_APPROACH_BACK)
-        confirm(f"{i+1}번 뚜껑 열기 (0° → 180°, 철판이 평평하게)")
-        n = max(1, int(round(180.0 / P.LID_STEP_DEG)))
+    def _side_back(pose, label):
+        """옆에서 다가가는 거리: 안전 영역 밖이면 10mm씩 줄임"""
+        back = P.HANDLE_APPROACH_BACK
+        while back > 10:
+            try:
+                P.check_pose(offset_tool(pose, -back), label)
+                break
+            except ValueError:
+                back -= 10.0
+        return back
+
+    def make_j6_room(sweep, label):
+        """앞으로 J6가 sweep도 돌아도 ±J6_LIMIT 안에 있도록, 빈손일 때 미리 360° 감아 두기"""
+        j6 = list(get_current_posj())[5]
+        lim = P.J6_LIMIT
+        for turn in (0.0, 360.0, -360.0):
+            a = j6 + turn
+            if min(a, a + sweep) >= -lim and max(a, a + sweep) <= lim:
+                break
+        else:
+            raise ValueError(f"[안전 정지] {label}: J6 {j6:.0f}°에서 {sweep:+.0f}°를 돌 여유가 없어요 (한계 ±{lim:.0f}°)")
+        if turn:
+            confirm(f"{label}: 빈손으로 손목(J6) {j6:.0f}° → {j6 + turn:.0f}° 미리 감기 "
+                    f"(이어서 {sweep:+.0f}° 돌아도 한계 ±{lim:.0f}° 안)")
+            movej(posj(0, 0, 0, 0, 0, turn), vel=P.VEL_J * scale, acc=P.ACC_J * scale, mod=DR_MV_MOD_REL)
+
+    def side_approach(pose, label, j6_sweep=None):
+        appr = offset_tool(pose, -_side_back(pose, label))
+        high = list(appr); high[2] = P.OBJ_TRANSIT_Z
+        move_jx(high, f"{label} 옆 위")
+        if j6_sweep:
+            make_j6_room(j6_sweep, label)
+        move_jx(appr, f"{label} 옆으로 내려가기")
+        move_l(pose, f"{label} 잡는 점", vel=P.VEL_SLOW_L)
+
+    def side_leave(label):
+        here = cur()
+        out = offset_tool(here, -_side_back(here, label))
+        move_l(out, f"{label}에서 옆으로 빠지기", vel=P.VEL_SLOW_L)
+        up_ = list(out); up_[2] = P.OBJ_TRANSIT_Z
+        move_l(up_, "위로 빠지기", vel=P.VEL_SLOW_L)
+
+    def _R_now():
+        return P._zyz_mat(*cur()[3:6])
+
+    def close_lid(mi):
+        """가까운 손잡이를 옆에서 잡고 180° 넘겨 먼 판(반죽) 위에 덮기 → 놓고 빠지기"""
+        confirm("닫기: 가까운 손잡이를 옆에서 잡기")
+        gripper.move(G.HANDLE_OPEN_WIDTH, wait=0.3)
+        unwind_if_wound("닫기 전")
+        side_approach(P.side_lid_pose(180.0, 0.0, mi), "가까운 손잡이", j6_sweep=P.LID_J6_SWEEP)
+        gripper.move(G.HANDLE_GRIP_WIDTH, current=G.HANDLE_GRIP_CURRENT)
+        held_pub.publish(String(data="near|" + ",".join(f"{v:.2f}" for v in cur())))
+        confirm("경첩을 축으로 180° 넘겨 먼 판 위에 덮기")
+        lid_arc(mi, 180.0, 0.0, "닫기", 0.0, P.STACK_T)
+        gripper.move(G.STACK_OPEN_WIDTH, wait=0.3)        # 놓되 손은 그 자리 (밑면 익는 동안)
+        held_pub.publish(String(data="|" + ",".join(f"{v:.2f}" for v in cur())))
+
+    def _end_on_approach(pose, label, open_w):
+        gripper.move(open_w, wait=0.3)
+        appr = offset_tool(pose, -_side_back(pose, label))
+        high = list(appr); high[2] = P.OBJ_TRANSIT_Z
+        move_jx(high, f"{label} 위")
+        move_jx(appr, f"{label} 앞으로 내려가기")
+        move_l(pose, f"{label} 잡는 점", vel=P.VEL_SLOW_L)
+
+    def turn_table(t0, t1, label):
+        """경첩 봉 끝을 잡고 돌림판을 t0 → t1 도 수평으로 돌리기"""
+        confirm(f"{label}: 경첩 봉 끝 잡기")
+        _end_on_approach(P.rod_pose(t0), "경첩 봉 끝", G.HANDLE_OPEN_WIDTH)
+        gripper.move(6.0, current=G.HANDLE_GRIP_CURRENT)
+        held_pub.publish(String(data="turn|" + ",".join(f"{v:.2f}" for v in cur())))
+        confirm(f"{label}: 돌림판 {t1 - t0:+.0f}° 돌리기")
+        n = max(1, int(round(abs(t1 - t0) / 15.0)))
         for k in range(1, n + 1):
-            phi = 180.0 * k / n
-            move_l(P.lid_side_grip(phi, mold_short), f"열기 {phi:.0f}°", vel=P.VEL_SLOW_L)
+            move_l(P.rod_pose(t0 + (t1 - t0) * k / n), f"돌리기 {(t1 - t0) * k / n:+.0f}°", vel=P.VEL_SLOW_L)
         gripper.move(G.HANDLE_OPEN_WIDTH, wait=0.3)
-        out = offset_tool(cur(), -P.LID_APPROACH_BACK)
-        move_l(out, "손잡이에서 옆으로 빠지기", vel=P.VEL_SLOW_L)
-        up_ = cur(); up_[2] += P.RETREAT_UP
-        move_l(up_, "뚜껑에서 위로 빠지기")
+        held_pub.publish(String(data="|" + ",".join(f"{v:.2f}" for v in cur())))
+        side_leave("경첩 봉")
 
-    # ---------------- 틀 뒤집기 (겹친 손잡이 4cm) ----------------
-    def flip_in_air(deg, label):
-        """잡은 틀을 수직으로 LIFT_HEIGHT만큼 들고 → 공중에서 J6로 deg 회전 → 같은 자리로 수직으로 내려놓기"""
-        base = cur()
-        up_ = list(base); up_[2] += P.LIFT_HEIGHT
-        move_l(up_, f"{label}: +{P.LIFT_HEIGHT/10:.0f}cm 수직으로 들기", vel=P.VEL_SLOW_L)
-        confirm(f"{label}: 공중에서 {abs(deg):.0f}° 돌리기")
-        d = go_rel_j6(deg)
-        down = base[:3] + cur()[3:]                    # 위치는 처음 자리, 자세는 돌린 그대로
-        move_l(down, f"{label}: 있던 자리에 수직으로 내려놓기", vel=P.VEL_SLOW_L)
-        return d
+    def flip_stack(mi):
+        """닫은 뒤 갈색 겹친 손잡이를 잡고 (모두 손잡이 축 = x축 회전):
+        +20cm → 공중에서 x축 180° → 로봇 쪽 5cm → -20cm → 10초
+        → 바닥에서 x축 180° 되돌리기 (손잡이가 반원으로 오르내림) → 같은 방법으로 한 번 더 180° → 로봇 쪽 5cm"""
+        R0 = P.stack_rot(mi)
+        g = P.pose_with(P.stack_tcp(0.0, mi), R0)
+        confirm("뒤집기: 그 자리에서 겹친 손잡이 2장 함께 잡기")
+        gripper.move(G.STACK_OPEN_WIDTH, wait=0.3)
+        if math.dist(cur()[:3], g[:3]) > 30.0:            # (중간 단계부터 시작해서 손이 딴 데 있을 때)
+            side_approach(g, "겹친 손잡이")
+        else:
+            move_l(g, "겹친 손잡이 가운데로", vel=P.VEL_SLOW_L)
+        gripper.move(G.STACK_GRIP_WIDTH, current=G.STACK_GRIP_CURRENT)
 
-    def flip_stack(i):
-        """철판 옆 손잡이를 축 방향으로 물고 → 들어 올려 공중에서 180° 뒤집고 → 있던 자리에 내려놓기.
-        대기 후 (FLIP_BACK) 같은 방법으로 되돌려서 뚜껑이 다시 위로 오게 해요."""
-        pick(P.side_handle_grip(), G.SIDE_OPEN_WIDTH, G.SIDE_GRIP_WIDTH,
-             G.SIDE_GRIP_CURRENT, f"{i+1}번 틀: 철판 옆 손잡이")
-        d = flip_in_air(P.FLIP_ANGLE, f"{i+1}번 틀 뒤집기")
-        confirm(f"뒤집은 채 {P.BAKE_SEC_SIDE2:.0f}초 대기")
+        held_pub.publish(String(data="mold|" + ",".join(f"{v:.2f}" for v in cur())))   # RViz: 틀이 손을 따라감
+        L, S_ = P.FLIP_LIFT, P.FLIP_SLIDE
+
+        def rotate(b0, b1, slide, label, dz=0.0, roll=False):
+            """손잡이 축(x)으로 b0 → b1. roll=True면 바닥에서 모서리가 안 닿을 만큼만 손잡이가 반원으로 오르내림"""
+            confirm(f"{label}: 갈색 손잡이 잡은 채 x축으로 {b1 - b0:+.0f}°")
+            n = max(1, int(round(abs(b1 - b0) / P.FLIP_STEP_DEG)))
+            for k in range(1, n + 1):
+                b = b0 + (b1 - b0) * k / n
+                z = dz + (P.roll_bump(b) if roll else 0.0)
+                move_l(P.flip_pose(b, slide, z, mi), f"{label} {b:.0f}° (+{z/10:.1f}cm)", vel=P.VEL_SLOW_L)
+
+        # 1) +20cm → 공중에서 x축 180° → 로봇 쪽 5cm → -20cm
+        move_l(P.flip_pose(0.0, 0.0, L, mi), f"+{L/10:.0f}cm 들어올리기", vel=P.VEL_SLOW_L)
+        rotate(0.0, 180.0, 0.0, "공중 뒤집기", dz=L)
+        move_l(P.flip_pose(180.0, S_, L, mi), f"로봇 쪽으로 x {S_/10:.0f}cm", vel=P.VEL_SLOW_L)
+        move_l(P.flip_pose(180.0, S_, 0.0, mi), f"-{L/10:.0f}cm 받침대 위에 내려놓기", vel=P.VEL_SLOW_L)
+        # 2) 잡은 채 10초
+        confirm(f"앞면 익기: 잡은 채 {P.BAKE_SEC_SIDE2:.0f}초 대기")
         wait(P.BAKE_SEC_SIDE2)
-        if P.FLIP_BACK:
-            flip_in_air(-d, f"{i+1}번 틀 되돌리기 (뚜껑이 다시 위로)")
-        gripper.move(G.SIDE_OPEN_WIDTH, wait=0.3)
-        up_ = cur(); up_[2] += P.RETREAT_UP           # 손가락이 수평으로 벌어져 있어서 위로 빼면 바로 빠짐
-        move_l(up_, "손잡이에서 위로 빠지기", vel=P.VEL_SLOW_L)
+        # 3) 바닥에서 반원으로 180° 되돌리기 → 한 번 더 180° (그리퍼 몸통은 늘 위로 지나감)
+        rotate(180.0, 0.0, S_, "바닥 뒤집기 (되돌리기)", roll=True)
+        rotate(0.0, 180.0, S_, "바닥 뒤집기 (한 번 더)", roll=True)
+        # 4) 로봇 쪽으로 5cm (끌리지 않게 살짝 들고)
+        up = P.FLIP_SLIDE_UP
+        move_l(P.flip_pose(180.0, S_, up, mi), f"살짝 들기 +{up/10:.0f}cm", vel=P.VEL_SLOW_L)
+        move_l(P.flip_pose(180.0, 2 * S_, up, mi), f"로봇 쪽으로 x {S_/10:.0f}cm", vel=P.VEL_SLOW_L)
+        move_l(P.flip_pose(180.0, 2 * S_, 0.0, mi), "내려놓기", vel=P.VEL_SLOW_L)
+        held_pub.publish(String(data="|" + ",".join(f"{v:.2f}" for v in cur())))
 
-    # ---------------- 꼬챙이로 붕어빵 꺼내기 ----------------
-    def skewer_out_pose():
-        """꽂이에서 뽑은 자리 (손잡이가 꽂이 밖으로 나온 위치)"""
-        q = P.skewer_rest_pose()
-        q[1] += P.SHORT_SIGN * (P.SKEWER_IN_HOLDER + 20.0)
-        return q
+    def open_lid(mi):
+        """다 구운 뒤 (뒤집기 2번 = 원래 방향): 겹친 손잡이를 놓고 빠짐 → '위' 갈색 손잡이 양옆을 잡고
+        경첩을 축으로 펼치기. 한 번에 다 펴면 손목이 틀에 닿아서 두 번에 나눔:
+          1단계 위에서 기울여 잡고 0 → 90° (세움) → 놓고 위로 빠지기
+          2단계 세운 손잡이를 바깥쪽에서 수평으로 다시 잡고 90 → 175° → 놓고 빠지기"""
+        if not P.FLIP_BACK:
+            raise ValueError("[안전 정지] 뒤집은 채로는 열 수 없어요 → positions.py FLIP_BACK = True")
+        confirm("열기: 겹친 손잡이 놓고 옆으로 빠지기")
+        gripper.move(G.STACK_OPEN_WIDTH, wait=0.3)
+        side_leave("겹친 손잡이")
 
-    def take_skewer():
-        """꽂이에서 하나뿐인 꼬챙이를 뽑아 수평으로 들기"""
-        pick(P.skewer_rest_pose(), G.SKEWER_OPEN_WIDTH, G.SKEWER_GRIP_WIDTH,
-             G.SKEWER_GRIP_CURRENT, "꼬챙이 손잡이 (위에서 가로로)", obj="skewer")
-        move_l(skewer_out_pose(), "꼬챙이 뽑기 (꽂힌 방향 반대로 수평)", vel=P.VEL_SLOW_L)
-        up_ = cur(); up_[2] = P.SKEWER_TRANSIT_Z
-        move_l(up_, "꼬챙이 수평으로 들기", vel=P.VEL_SLOW_L)
+        def grab():
+            gripper.move(G.TOP_HANDLE_GRIP_WIDTH, current=G.TOP_HANDLE_GRIP_CURRENT)
+            held_pub.publish(String(data="near|" + ",".join(f"{v:.2f}" for v in cur())))
 
-    def return_skewer():
-        """꼬챙이를 꽂이에 다시 꽂고 놓기 (뽑을 때의 반대)"""
-        out = skewer_out_pose()
-        hi = list(out); hi[2] = P.SKEWER_TRANSIT_Z
-        move_jx(hi, "꽂이 위로 (꼬챙이 수평)")
-        move_l(out, "꽂이 높이로 내리기", vel=P.VEL_SLOW_L)
-        confirm("꼬챙이를 꽂이에 다시 꽂기")
-        rest = P.skewer_rest_pose()
-        move_l(rest, "꼬챙이 꽂기", vel=P.VEL_SLOW_L)
-        gripper.move(G.SKEWER_OPEN_WIDTH, wait=0.3)
-        held_pub.publish(String(data=""))
-        up_ = list(rest); up_[2] = P.OBJ_TRANSIT_Z
-        move_l(up_, "꼬챙이에서 위로 빠지기", vel=P.VEL_SLOW_L)
+        def release():
+            gripper.move(G.TOP_HANDLE_OPEN_WIDTH, wait=0.3)
+            held_pub.publish(String(data="|" + ",".join(f"{v:.2f}" for v in cur())))
 
-    def skewer_one(i, k):
-        """(꼬챙이를 든 상태에서) i번 틀 붕어빵을 가운데 가로선에서 SKEWER_TILT_DEG만큼 사선으로 꿰고 → 들어 올려
-        → k번 종이컵 위에서 꼬챙이를 세워(끝이 아래) 붕어빵을 넣고 → 꼬챙이만 위로 뽑아 → 다시 수평으로.
-        꼬챙이 1개에 붕어빵 1개만."""
-        if True:
-            start, end, _, _ = P.skewer_pierce(i)
-            hi = list(start); hi[2] = P.SKEWER_TRANSIT_Z
-            move_jx(hi, f"{i+1}번 붕어빵 옆 위로 (꼬챙이 {P.SKEWER_TILT_DEG:.0f}° 사선)")
-            move_l(start, f"{i+1}번 붕어빵 높이로 수직으로 내리기", vel=P.VEL_SLOW_L)
-            confirm(f"{i+1}번 붕어빵 꿰기 (사선 {P.SKEWER_TILT_DEG:.0f}°, {P.SKEWER_SPEED:.0f}mm/s)")
-            move_l(end, f"{i+1}번 붕어빵 꿰기", vel=P.SKEWER_SPEED)
-            lift = list(end); lift[2] += P.SKEWER_LIFT
-            move_l(lift, f"꿴 붕어빵 수직으로 들기 (+{P.SKEWER_LIFT/10:.0f}cm)", vel=P.VEL_SLOW_L)
-            up_ = cur(); up_[2] = P.SKEWER_TRANSIT_Z
-            move_l(up_, "꼬챙이 수평인 채로 더 들기", vel=P.VEL_SLOW_L)
+        def arc(stage, t0, t1):
+            n = max(1, int(round(abs(t1 - t0) / P.LID_STEP_DEG)))
+            for k in range(1, n + 1):
+                t = t0 + (t1 - t0) * k / n
+                move_l(P.top_handle_open_pose(t, mi, stage), f"열기 {t:.0f}°", vel=P.VEL_SLOW_L)
 
-            # 종이컵(손님이 들고 있음): 컵 위에서 그리퍼를 수평으로, 꼬챙이는 옆으로 눕혀 들고
-            # → J6만 굴려 꼬챙이를 세우고(끝이 아래, 손잡이 위치 그대로) → 수직으로 넣기 → 꼬챙이만 뽑기
-            rot, put = P.cup_plan()
-            move_jx(rot[0], f"손님 컵 위로 ({k+1}번째 붕어빵, 꼬챙이 수평)")
-            if k > 0:
-                log.info(f"   🥤 새 컵을 들어 주세요 ({P.CUP_SWAP_SEC:.0f}초)")
-                wait(P.CUP_SWAP_SEC)
-            confirm("컵 위에서 꼬챙이 세우기 (끝이 아래로, 손목만 굴림)")
-            for j, q in enumerate(rot[1:], 1):
-                move_l(q, f"꼬챙이 세우기 {90 * j // (len(rot) - 1)}°", vel=P.VEL_SLOW_L)
-            move_l(put, "붕어빵을 손님 컵에 넣기 (컵 아래쪽에 끼일 때까지)", vel=P.VEL_SLOW_L)
-            held_pub.publish(String(data=f"cup:{k}"))      # RViz: 붕어빵이 컵에 남음 (꼬챙이는 계속 들고 있음)
-            confirm("꼬챙이만 위로 뽑기 (붕어빵은 컵에 남김)")
-            move_l(rot[-1], "꼬챙이를 붕어빵에서 수직으로 뽑기", vel=P.SKEWER_PULL_SPEED)
-            for j, q in enumerate(reversed(rot[:-1]), 1):
-                move_l(q, f"꼬챙이 다시 눕히기 {90 - 90 * j // (len(rot) - 1)}°", vel=P.VEL_SLOW_L)
+        mid, end = P.TOP_OPEN_MID_DEG, P.TOP_OPEN_END_DEG
+        # 1단계: 위 갈색 손잡이를 위에서 (기울여) 잡고 세우기
+        confirm("열기 1단계: 위 갈색 손잡이 양옆을 위에서 잡기 (아래 손잡이엔 안 닿게)")
+        gripper.move(G.TOP_HANDLE_OPEN_WIDTH, wait=0.3)
+        side_approach(P.top_handle_open_pose(0.0, mi, 1), "위 갈색 손잡이")
+        grab()
+        confirm(f"경첩을 축으로 0 → {mid:.0f}° 세우기")
+        arc(1, 0.0, mid)
+        release()
+        up_ = cur(); up_[2] += P.TOP_REGRIP_UP
+        move_l(up_, "세운 손잡이에서 위로 빠지기", vel=P.VEL_SLOW_L)
+
+        # 2단계: 세운 위 갈색 손잡이를 바깥쪽에서 수평으로 다시 잡고 눕히기
+        unwind_if_wound("열기 2단계 전")                    # 빈손: J4가 감겨 있으면 홈에서 풀기
+        confirm("열기 2단계: 세운 위 갈색 손잡이를 바깥쪽에서 다시 잡기")
+        side_approach(P.top_handle_open_pose(mid, mi, 2), "세운 위 갈색 손잡이")
+        grab()
+        confirm(f"경첩을 축으로 {mid:.0f} → {end:.0f}° 눕히기")
+        arc(2, mid, end)
+        release()                                         # 남은 각도만큼 받침대 위로 눕혀짐
+        side_leave("위 갈색 손잡이")
 
     # ---------------- 전체 시퀀스 ----------------
     def run_all(fillings, start=0):
-        """한 판(틀 2개까지) 굽고 꺼내기. start = 이 손님 주문 중 몇 번째 붕어빵부터인지 (꼬챙이·컵 번호)"""
-        # 틀 1·2에 주문 순서대로 속재료 배정 (주문이 1개면 1번 틀만)
+        """start = 시작할 단계 번호 (중간부터 다시 할 때)
+        0 홈 · 1 1차 반죽 · 2 속재료 · 3 2차 반죽 · 4 뚜껑 닫기 · 5 굽기 대기 · 6 뒤집기 · 7 뚜껑 열기"""
+        STEPS = ["홈", "1차 반죽", "속재료", "2차 반죽", "뚜껑 닫기", "굽기 대기", "뒤집기", "뚜껑 열기"]
         n_molds = min(len(fillings) if fillings else 1, len(P.MOLD_GRIPS))
         molds = [(i, P.MOLD_GRIPS[i]) for i in range(max(n_molds, 1))]
         kinds = []
@@ -491,37 +554,39 @@ def main(args=None):
             f = fillings[i] if i < len(fillings) and fillings[i] in P.SAUCE_PICKS else "팥"
             kinds.append(f)
         log.info("틀 배정: " + ", ".join(f"{i+1}번={kinds[i]}" for i, _ in molds))
-        confirm("홈 자세")
-        home()
-        gripper.move(G.HANDLE_OPEN_WIDTH, wait=0.2)
+        held_pub.publish(String(data="reset"))          # RViz: 틀을 처음(펼침) 모양으로
+        if start:
+            log.info(f"▶ {start}단계({STEPS[min(start, len(STEPS) - 1)]})부터 시작")
 
-        pour_round(P.POUR_HOLD1, "1차 반죽", molds)
-        for kind in dict.fromkeys(kinds):              # 주문 순서, 중복 없이
-            use = [(i, g) for i, g in molds if kinds[i] == kind]
-            dispense_round(kind, use)
-        pour_round(P.POUR_HOLD2, "2차 반죽", molds)
-        # 두 틀이 한 철판에 고정 → 손잡이 1개로 한 번에 닫기·뒤집기·열기
-        close_lid(0, P.MOLD_SHORT)
+        def do(n):
+            return start <= n
 
-        confirm(f"{P.BAKE_SEC_SIDE1:.0f}초 대기")
-        wait(P.BAKE_SEC_SIDE1)
-        flip_stack(0)
-        open_lid(0, P.MOLD_SHORT)
-        # 꺼내기: 꼬챙이 하나로 반죽 부은 순서대로 1개씩 꿰어 종이컵에 넣고, 꼬챙이만 빼서 다음 것.
-        # 컵 번호는 앞 판에서 이어서 (start). 판이 끝나면 꼬챙이를 꽂이에 돌려놓기
-        old_margin = P.SAFE_EDGE_MARGIN
-        P.SAFE_EDGE_MARGIN = P.SKEWER_EDGE_MARGIN      # 꼬챙이 동작 동안만 가장자리 여유 1cm
-        try:
-            take_skewer()
-            for n, (i, _) in enumerate(molds):
-                k = start + n
-                skewer_one(i, k)
-                log.info(f"✅ {i+1}번 틀 붕어빵({kinds[n]}) → 손님 컵 ({k+1}번째 붕어빵)")
-            return_skewer()
-        finally:
-            P.SAFE_EDGE_MARGIN = old_margin
+        if do(0):
+            confirm("홈 자세")
+            home()
+            gripper.move(G.HANDLE_OPEN_WIDTH, wait=0.2)
+        if do(1):
+            pour_round(P.POUR_HOLD1, "1차 반죽", molds)
+        if do(2):
+            for kind in dict.fromkeys(kinds):          # 주문 순서, 중복 없이
+                use = [(i, g) for i, g in molds if kinds[i] == kind]
+                dispense_round(kind, use)
+        if do(3):
+            pour_round(P.POUR_HOLD2, "2차 반죽", molds)
+        if do(4):
+            for h in range(len(P.HANDLE_SHORTS)):                         # 이번에 쓴 틀만 차례로 닫기
+                close_lid(h)
+        if do(5):
+            confirm(f"밑면 익기: {P.BAKE_SEC_SIDE1:.0f}초 대기 (손은 닫은 손잡이 자리)")
+            wait(P.BAKE_SEC_SIDE1)
+        if do(6):
+            for h in range(len(P.HANDLE_SHORTS)):                         # 틀마다 들어서 180° 뒤집기
+                flip_stack(h)
+        if do(7):
+            for h in range(len(P.HANDLE_SHORTS)):                         # 틀마다 펼치기
+                open_lid(h)
         home()
-        log.info(f"✅ 이번 판 완료 ({len(molds)}개, 이 손님의 {start+1}~{start+len(molds)}번째 붕어빵)")
+        log.info("✅ 오늘 공정 완료 (틀이 평평하게 열림)")
 
     try:
         set_robot_mode(ROBOT_MODE_AUTONOMOUS)

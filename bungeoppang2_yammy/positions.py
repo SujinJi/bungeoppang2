@@ -207,11 +207,12 @@ KETTLE_PICK = _cup_pick()
 
 
 APPROACH_BACK = 80.0     # ★ 잡기 전 뒤(베이스 쪽)에서 대기하는 거리
-LIFT_HEIGHT = 300.0      # ★ 뒤집기 전 드는 높이 (+30cm)
-FLIP_ANGLE = 180.0       # ★ 뒤집는 각도 (J6 = 손잡이 축)
+LIFT_HEIGHT = 250.0      # ★ 뒤집기 전 드는 높이 (+25cm)
+FLIP_ANGLE = 180.0       # ★ 뒤집는 각도 (J6 = 손잡이 반대축 = 짧은 방향 축, 손잡이 끝이 중심)
 RETREAT_UP = 100.0       # ★ 놓은 뒤 위로 빠지는 높이
 RETREAT_SIDE = 50.0      # ★ 뒤집은 뒤 손잡이에서 옆(짧은 방향 Y)으로 떨어지는 거리 (5cm)
-FLIP_BACK = True         # ★ 대기 후 다시 공중에서 180° 되돌려 내려놓기 (뚜껑이 위로 와야 뚜껑 열기 가능)
+FLIP_BACK = True         # ★ 대기 후 다시 들어 J6 180° 되돌려 내려놓기. 끄면 뚜껑을 못 엶
+#   (뒤집으면 틀이 손잡이 너머로 넘어가 경첩이 약 75cm → 열 때 손잡이가 약 90cm, E0509 약 78cm)
 
 # ---- 제스처 (인사·대답) ----
 BOW_J = [0.0, 30.0, 60.0, 0.0, 90.0, 0.0]   # ★ 인사 자세 (posj): 어깨를 30° 숙임, 손끝은 작업대 위 약 26cm
@@ -230,7 +231,15 @@ POUR_TILT_DEG = 25.0     # ★ 주전자 기울이는 각도 (25도)
 POUR_HOLD1 = 2.0         # ★ 1차 반죽: 기울인 채 유지 (2초)
 POUR_HOLD2 = 1.0         # ★ 2차 반죽: 유지 (1초)
 POUR_RATIO = 2.0 / 3.0   # ★ 붓는 점: 틀 깊이의 2/3 지점 (손잡이에서 먼 쪽)
-POUR_HOP = 80.0          # ★ 칸 사이 이동할 때 띄우는 높이
+POUR_SIDE_TOL = 90.0     # ★ 틀끼리 그리퍼 방향(팔 기준) 차이 허용. 넘으면 비커 든 채 J4가 반 바퀴 감김
+POUR_HOP = 80.0         # ★ 칸 사이 이동할 때 띄우는 높이
+POUR_PLATE = 1           # ★ 반죽·소스를 넣는 판: 1 = 먼 판(마주보는 틀), 0 = 가까운 판
+#   닫을 때 가까운 판(손잡이)이 경첩을 넘어와 먼 판 위를 덮어요 → 반죽은 먼 판에
+
+
+def plate_k():
+    """손잡이 잡는 점(손끝) → 반죽 넣는 판 가운데까지 틀방향 거리"""
+    return HANDLE_STICK + MOLD_W * (0.5 + POUR_PLATE)
 
 SAUCE_LIFT = 150.0       # ★ 소스통 수직으로 드는 높이
 FLIP_CLEAR = 150.0       # ★ 입구 뒤집을 때 여유 높이 (통 절반 길이보다 크게)
@@ -460,6 +469,10 @@ VEL_L, ACC_L = 100.0, 100.0
 VEL_SLOW_L = 30.0
 VEL_FLIP = 30.0
 J6_LIMIT = 355.0
+J4_UNWIND_DEG = 180.0    # ★ 빈손 단계 시작 때 J4가 이보다 감겨 있으면 홈으로 가서 풀기 (한계 ±360°)
+J_WOUND_WARN = 340.0     # 도달 실패 시 이 각도를 넘은 관절이 있으면 '관절 한계' 원인으로 안내
+LID_J6_SWEEP = -240.0    # ★ 닫기 180° 동안 J6가 도는 양 (에뮬레이터 IK로 잰 값 약 -220°). 뒤집기·되돌리기는 0 쪽으로 풀었다 다시 감음
+#   여유가 없으면 닫기 전에 빈손으로 공중에서 J6를 360° 미리 감아 둠
 BAKE_SEC_SIDE1 = 10.0    # ★ 뚜껑 닫고 기다리는 시간 (10초, 실물은 굽는 시간으로)
 BAKE_SEC_SIDE2 = 10.0    # ★ 뒤집은 채 잡고 기다리는 시간 (10초)
 
@@ -559,8 +572,10 @@ def _obstacles():
     grip_f = MOLD_FWD + TOOL_LENGTH
     edge = grip_f + HANDLE_STICK
     far = edge + 2 * MOLD_W
-    hs = (MOLD_SHORT - HANDLE_W / 2, MOLD_SHORT + HANDLE_W / 2)
-    rects = [((edge - HANDLE_L, edge), hs), ((far, far + HANDLE_L), hs)]
+    rects = []
+    for ms in HANDLE_SHORTS:                        # 앞·뒤 손잡이
+        hs = (ms - HANDLE_W / 2, ms + HANDLE_W / 2)
+        rects += [((edge - HANDLE_L, edge), hs), ((far, far + HANDLE_L), hs)]
     for f, s in SAUCE_SPOTS.values():           # 소스통 중심 (틀쪽 거리, 짧은방향)
         r = SAUCE_DIA / 2
         rects.append(((f - r, f + r), (s - r, s + r)))
@@ -597,11 +612,22 @@ def _pour_clear(S, A, rects):
     return min(gaps)
 
 
-def plan_pour(grip):
+def pour_side(S, A):
+    """그리퍼가 팔(베이스→손목 방향) 기준으로 몇 도 돌아가 있는지 (-180~180).
+    부호가 바뀌면(팔 왼쪽 ↔ 오른쪽) 비커를 든 채 손목이 반 바퀴 넘어가요."""
+    F = _pour_poses(S, A)[0]
+    az = math.degrees(math.atan2(F[1], F[0]))
+    return (A - az + 180.0) % 360.0 - 180.0
+
+
+def plan_pour(grip, prev_side=None):
     """주둥이를 이 틀의 노란 생선 칸 안에 두고, 손잡이·소스통을 피하면서
-    팔이 가장 편한 그리퍼 방향을 고름 → (주둥이 목표 S, 방향 A)"""
+    팔이 가장 편한 그리퍼 방향을 고름 → (주둥이 목표 S, 방향 A)
+    prev_side = 앞 틀에서 쓴 pour_side. 주면 같은 쪽(차이 POUR_SIDE_TOL 이내)만 고름.
+    (예전엔 1번 틀 -92°, 2번 틀 +88°로 반대쪽을 골라 → 비커 든 채 J4가 틀마다 반 바퀴씩
+     같은 방향으로 감겨 2번 붓기 뒤 J4 362° 한계 초과 → 뚜껑 닫기에서 멈췄음)"""
     md, t0 = tool_dir(grip), tool_tip(grip)
-    k = HANDLE_STICK + MOLD_W / 2
+    k = plate_k()
     cx, cy = t0[0] + md[0] * k, t0[1] + md[1] * k
     rects = _obstacles()
     best = None
@@ -610,6 +636,10 @@ def plan_pour(grip):
         for A in range(0, 360, 5):
             if _pour_clear(S, A, rects) < POUR_CLEAR:
                 continue
+            if prev_side is not None:
+                d = (pour_side(S, A) - prev_side + 180.0) % 360.0 - 180.0
+                if abs(d) > POUR_SIDE_TOL:
+                    continue
             F, T, H = _pour_poses(S, A)
             try:
                 for q in (F, T, H):
@@ -627,8 +657,295 @@ def plan_pour(grip):
         if best:
             break
     if best is None:
+        if prev_side is not None:
+            raise ValueError("[붓기 계획 실패] 앞 틀과 같은 쪽으로 부을 방향이 없어요 "
+                             "(반대쪽으로 가면 J4가 감겨 한계 초과) — 비커/틀 위치를 조정하세요")
         raise ValueError("[붓기 계획 실패] 손잡이·소스통을 피해서 부을 방향이 없어요 — 비커/틀 위치를 조정하세요")
     return best[1], best[2]
+
+
+def plan_pours(molds):
+    """틀 여러 개 붓기 계획: 첫 틀에서 고른 쪽을 나머지 틀도 따라감 → [(i, S, A)]"""
+    plans, side = [], None
+    for i, grip in molds:
+        S, A = plan_pour(grip, side)
+        side = pour_side(S, A)
+        plans.append((i, S, A))
+    return plans
+
+
+# ================= 뚜껑 닫기·뒤집기·열기: 1·2번 틀 각자의 손잡이를 '옆에서' 잡기 =================
+# 철판 가운데 손잡이는 없음. 틀마다 가까운 판·먼 판에 손잡이가 하나씩 (틀 가운데 줄).
+# 1번 틀은 커넥터 쪽(좁은 쪽)에서, 2번 틀은 넓은 쪽에서 옆으로 들어와 잡아요 (옆 틀 손잡이와 안 부딪히게).
+SIDE_GRIP_SIGNS = [-1.0, +1.0]
+HANDLE_SHORTS = [MOLD_SHORT]     # ★ 손잡이 줄 (철판 가운데, 앞 손잡이·뒤 손잡이 한 쌍)   # ★ 틀별 그리퍼가 들어오는 쪽: -1 = 좁은 쪽, +1 = 넓은 쪽
+LID_GRIP_R = 150.0       # ★ 경첩 → 손잡이 잡는 점 거리 (틀에서 떨어진 손잡이 바깥쪽을 잡음)
+HANDLE_GAP_CLOSED = 10.0  # ★ 닫았을 때 위·아래 손잡이 사이 틈 (실측 약 1cm)
+STACK_T = HANDLE_T + HANDLE_GAP_CLOSED   # 닫힌 상태: 아래 손잡이 중심 → 위 손잡이 중심 (겹친 전체 두께 = 2*HANDLE_T + 틈 = 5cm)
+
+
+def _zyz_mat(a, b, c):
+    a, b, c = (math.radians(t) for t in (a, b, c))
+    ca, sa, cb, sb, cc, sc = math.cos(a), math.sin(a), math.cos(b), math.sin(b), math.cos(c), math.sin(c)
+    return [[ca * cb * cc - sa * sc, -ca * cb * sc - sa * cc, ca * sb],
+            [sa * cb * cc + ca * sc, -sa * cb * sc + ca * cc, sa * sb],
+            [-sb * cc, sb * sc, cb]]
+
+
+def _mat_zyz(R):
+    b = math.atan2(math.hypot(R[0][2], R[1][2]), R[2][2])
+    if abs(math.sin(b)) < 1e-6:
+        a, c = 0.0, math.atan2(R[1][0], R[0][0]) if R[2][2] > 0 else math.atan2(R[1][0], -R[0][0])
+    else:
+        a = math.atan2(R[1][2], R[0][2])
+        c = math.atan2(R[2][1], -R[2][0])
+    return [math.degrees(a), math.degrees(b), math.degrees(c)]
+
+
+def _axis_rot(k, deg):
+    t = math.radians(deg); c, s_ = math.cos(t), math.sin(t); x, y, z = k
+    return [[c + x * x * (1 - c), x * y * (1 - c) - z * s_, x * z * (1 - c) + y * s_],
+            [y * x * (1 - c) + z * s_, c + y * y * (1 - c), y * z * (1 - c) - x * s_],
+            [z * x * (1 - c) - y * s_, z * y * (1 - c) + x * s_, c + z * z * (1 - c)]]
+
+
+def _mm(A, B):
+    return [[sum(A[i][k] * B[k][j] for k in range(3)) for j in range(3)] for i in range(3)]
+
+
+def _side_base(mi):
+    vy = -SIDE_GRIP_SIGNS[mi] * SHORT_SIGN
+    return _zyz_mat(90.0 if vy > 0 else -90.0, 90.0, 90.0), (0.0, vy, 0.0)
+
+
+def side_lid_pose(theta, z_extra=0.0, mi=0):
+    """mi번 틀: 경첩 각 theta(0 = 먼 판 펼쳐짐, 180 = 가까운 판 위에 덮임)일 때 먼 판 손잡이를 옆에서 잡은 자세"""
+    R0, v = _side_base(mi)
+    hx = MOLD_SIGN * HINGE_FWD
+    hy = SHORT_SIGN * HANDLE_SHORTS[mi]
+    hz = MOLD_GRIP[2]
+    th = math.radians(theta)
+    tx = hx + MOLD_SIGN * LID_GRIP_R * math.cos(th)
+    tz = hz + LID_GRIP_R * math.sin(th) + z_extra
+    R = _mm(_axis_rot((0.0, -MOLD_SIGN, 0.0), theta), R0)
+    return [tx - v[0] * TOOL_LENGTH, hy - v[1] * TOOL_LENGTH, tz - v[2] * TOOL_LENGTH, *_mat_zyz(R)]
+
+
+def side_flip_pose(beta, lift=0.0, mi=0):
+    """mi번 틀: 닫힌 뒤 겹친 손잡이를 옆에서 잡고, 손잡이 축(틀 방향)으로 beta도 돌린 자세"""
+    R0, v = _side_base(mi)
+    tx = MOLD_SIGN * (HINGE_FWD - LID_GRIP_R)
+    ty = SHORT_SIGN * HANDLE_SHORTS[mi]
+    tz = MOLD_GRIP[2] + STACK_T / 2 + lift
+    k = (-1.0 if v[1] > 0 else 1.0, 0.0, 0.0)          # 돌리는 동안 그리퍼 몸통이 '위'로 지나감
+    R = _mm(_axis_rot(k, beta), R0)
+    u = [R[i][2] for i in range(3)]
+    return [tx - u[0] * TOOL_LENGTH, ty - u[1] * TOOL_LENGTH, tz - u[2] * TOOL_LENGTH, *_mat_zyz(R)]
+
+
+# ---- 뒤집기: 틀 몸통 가운데를 축으로 180° → 몸통은 받침대 위 제자리, 손잡이만 반대쪽(로봇 쪽)으로 ----
+# 닫힌 틀 몸통 = 먼 판 자리(경첩 ~ 경첩 + 판 깊이). 손잡이(J6 축)를 중심으로 돌리면 몸통이 손잡이 너머
+# (약 67~75cm)로 넘어가 받침대 밖에 놓였음 → 돌린 뒤 손을 수평으로 FLIP_SHIFT 만큼 옮겨서 몸통을 제자리로.
+# ※ 2026-11-11부터 안 씀: 뒤집기는 갈색 손잡이를 잡고 z(위아래)만 움직임, x·y 이동 없음 (bake_sequence_node.flip_stack)
+FLIP_PIVOT_FWD = HINGE_FWD + MOLD_W / 2          # ★ 몸통 가운데 (틀 방향). 실물 받침대 중심으로 맞추기
+FLIP_SHIFT = 2.0 * (FLIP_PIVOT_FWD - (HINGE_FWD + LID_GRIP_R))   # 손잡이 → 반대쪽 손잡이 자리 (음수 = 로봇 쪽)
+
+
+def flip_shift_vec():
+    """뒤집은 뒤 손을 옮기는 방향·거리 (로봇 x, y)"""
+    return (MOLD_SIGN * FLIP_SHIFT, 0.0)
+
+
+# ---- 뚜껑 열기: 다 구운 뒤 위 판 '옆면'을 옆에서 잡고 경첩을 축으로 펼치기 ----
+# 닫힌 손잡이 사이 틈(1cm)엔 손가락(끝 9mm, 15mm 지점 14mm)이 못 들어가서 위 손잡이만 잡을 수 없어요.
+# 판 사이 틈은 4cm라 아래 손가락이 들어감 → 위 판 옆면 가장자리를 위·아래로 집어서 엶.
+PLATE_GAP_CLOSED = 40.0       # ★ 닫았을 때 위·아래 판 사이 틈 (실측 4cm)
+PLATE_T = 10.0                # ★ 위 판 옆 가장자리 두께 — 임시값! 실측해서 grip_params PLATE_* 폭도 같이 맞추기
+PLATE_GRIP_IN = 15.0          # ★ 판 옆면에서 안쪽으로 손끝을 넣는 깊이 (생선 칸에 안 닿게)
+PLATE_GRIP_FWD = HINGE_FWD + MOLD_W / 2   # ★ 잡는 점 틀 방향 위치 (닫힌 위 판 가운데)
+PLATE_SIDE_SHORT = MOLD_SHORT - GRILL_SHORT / 2   # 판 옆면 (로봇 중심선 쪽, 짧은방향)
+HINGE_SEAM_Z = MOLD_GRIP[2] + STACK_T / 2         # ★ 경첩 축 높이 = 위·아래 판 사이 틈 가운데
+OPEN_RELEASE_DEG = 15.0       # ★ 다 펴기 이만큼 전에 놓기 — 더 펴면 위쪽 손가락이 판 밑(받침대)에 깔려요
+OPEN_J6_SWEEP = -LID_J6_SWEEP * (180.0 - OPEN_RELEASE_DEG) / 180.0   # 열 때는 닫을 때 반대로 돎
+
+
+def plate_open_pose(theta, mi=0):
+    """위 판 옆면을 옆에서 잡은 자세. theta = 연 각도 (0 = 닫힘, 180 = 활짝).
+    손가락은 판 윗면·아랫면을 집고(아래 손가락은 판 사이 틈), 판이 돌면 같이 돌아요."""
+    R0, v = _side_base(mi)                         # 툴이 판 옆면 안쪽(짧은방향)을 봄, 손가락 위아래
+    p0 = [MOLD_SIGN * PLATE_GRIP_FWD,
+          SHORT_SIGN * PLATE_SIDE_SHORT + v[1] * PLATE_GRIP_IN,
+          HINGE_SEAM_Z + PLATE_GAP_CLOSED / 2 + PLATE_T / 2]
+    c = [MOLD_SIGN * HINGE_FWD, p0[1], HINGE_SEAM_Z]
+    Rh = _axis_rot((0.0, -MOLD_SIGN, 0.0), theta)  # +theta = 경첩 너머 로봇 쪽으로 펼침
+    d = [p0[k] - c[k] for k in range(3)]
+    p = [c[i] + sum(Rh[i][k] * d[k] for k in range(3)) for i in range(3)]
+    return pose_with(p, _mm(Rh, R0))
+
+
+# ---- 뚜껑 열기 (2026-11-11~): 뒤집기 2번 뒤 '위' 갈색 손잡이를 잡고 경첩을 축으로 펼치기 ----
+# 손가락은 위 손잡이의 양옆(폭 HANDLE_W 방향)을 집음 → 위·아래 손잡이 사이 1cm 틈에 손가락이 안 들어가도 됨.
+# 한 번 잡은 채로는 약 95°에서 손목이 틀에 닿거나 팔이 너무 접혀서(계산) 두 번에 나눠 잡아요:
+#   1단계: 위에서 TOP_TILT1 만큼 기울여 잡고 0 → TOP_OPEN_MID_DEG (세움) → 놓고 위로 빠지기
+#   2단계: 세운 손잡이의 바깥 끝 쪽을 아래 바깥에서 비스듬히 다시 잡고 TOP_OPEN_MID_DEG → TOP_OPEN_END_DEG → 놓기
+#   (틀을 로봇 쪽으로 10cm 당긴 뒤 기준: 1단계 어깨~손목 최소 254mm, 2단계 최대 614mm — 계산값)
+TOP_TILT1 = -45.0             # ★ 1단계 잡는 기울기 (0 = 수직으로 아래, - = 손목이 바깥쪽 위로) — 틀을 10cm 당긴 뒤 계산값
+TOP_TIP_UP1 = 8.0             # ★ 1단계: 위 손잡이 아랫면 → 손끝 (아래 손잡이에 안 닿게, 틈 1cm + 이 값)
+TOP_GRIP_R1 = 100.0           # ★ 1단계: 경첩 → 잡는 점 (손잡이 안쪽 끝, 손잡이는 77.5~227.5)
+TOP_TILT2 = 180.0             # ★ 2단계 기울기 (세웠을 때 툴이 수평으로 로봇 쪽을 봄 = 바깥쪽에서 잡기)
+TOP_TIP_UP2 = HANDLE_T + 5.0  # ★ 2단계: 손잡이 두께를 다 감싸게 손끝이 반대 면 너머 5mm
+TOP_GRIP_R2 = LID_GRIP_R      # ★ 2단계: 경첩 → 잡는 점 (손잡이 가운데)
+TOP_OPEN_MID_DEG = 90.0       # ★ 1단계 끝 = 뚜껑 세움. 실물에서 세운 뚜껑이 그대로 서 있는지 꼭 확인!
+TOP_OPEN_END_DEG = 175.0      # ★ 2단계 끝 = 이 각도에서 놓기 (남은 5°는 받침대 위로 눕혀짐)
+TOP_REGRIP_UP = 200.0         # ★ 1단계 뒤 세운 손잡이에서 위로 빠지는 거리 (손끝이 손잡이 끝 위로)
+
+
+def top_handle_open_pose(theta, mi=0, stage=1):
+    """위 갈색 손잡이를 잡은 자세. theta = 연 각도 (0 = 닫힘, 180 = 활짝). 손잡이와 함께 경첩을 돎.
+    stage 1 = 위에서 기울여 잡기, stage 2 = 세운 뒤 바깥쪽에서 잡기"""
+    tilt, tip_up, r = ((TOP_TILT1, TOP_TIP_UP1, TOP_GRIP_R1) if stage == 1
+                       else (TOP_TILT2, TOP_TIP_UP2, TOP_GRIP_R2))
+    # 툴이 아래(손가락은 손잡이 폭 방향 = 짧은방향으로 닫힘)인 자세를 경첩 축 방향으로 tilt만큼 기울임
+    R0 = _mm(_axis_rot((0.0, -MOLD_SIGN, 0.0), tilt), _zyz_mat(0.0, 180.0, 0.0))
+    upper_bottom = MOLD_GRIP[2] + STACK_T - HANDLE_T / 2
+    hinge = HINGE_FWD - FLIP_TOTAL_SLIDE           # 뒤집기 중 로봇 쪽으로 옮긴 만큼 경첩도 가까워짐
+    p0 = [MOLD_SIGN * (hinge + r), SHORT_SIGN * HANDLE_SHORTS[mi], upper_bottom + tip_up]
+    c = [MOLD_SIGN * hinge, p0[1], HINGE_SEAM_Z]
+    Rh = _axis_rot((0.0, -MOLD_SIGN, 0.0), theta)  # +theta = 경첩 너머 로봇 쪽으로 펼침
+    d = [p0[k] - c[k] for k in range(3)]
+    p = [c[i] + sum(Rh[i][k] * d[k] for k in range(3)) for i in range(3)]
+    return pose_with(p, _mm(Rh, R0))
+
+
+def stack_rot(mi=0):
+    """닫힌 자리(겹친 손잡이)를 옆에서 잡을 때 그리퍼 회전 (뒤집기 전)"""
+    return _side_base(mi)[0]
+
+
+def stack_tcp(lift=0.0, mi=0):
+    """닫힌 뒤 겹친 손잡이 2장(두께 합 4cm)의 가운데 = 잡는 점. lift = 들어 올린 높이"""
+    return side_tcp(0.0, STACK_T / 2 + lift, mi)
+
+
+# ---- 제자리에서 다시 잡기: 닫은 자리에서 그리퍼만 벌렸다 조여 겹친 손잡이를 잡고, 그대로 뒤집고, 그대로 펼침 ----
+def side_tcp(theta, z_extra=0.0, mi=0):
+    """경첩 각 theta일 때 그 판 손잡이 잡는 점 (0 = 먼 쪽, 180 = 가까운 쪽)"""
+    th = math.radians(theta)
+    return [MOLD_SIGN * HINGE_FWD + MOLD_SIGN * LID_GRIP_R * math.cos(th),
+            SHORT_SIGN * HANDLE_SHORTS[mi],
+            MOLD_GRIP[2] + LID_GRIP_R * math.sin(th) + z_extra]
+
+
+def pose_with(tcp, R):
+    """손끝 위치 + 회전행렬 → 로봇 자세"""
+    u = [R[i][2] for i in range(3)]
+    return [tcp[k] - u[k] * TOOL_LENGTH for k in range(3)] + _mat_zyz(R)
+
+
+def hinge_rot(theta, R_at_far):
+    """먼 쪽(0°)에서의 그리퍼 회전 R_at_far 를 경첩 축으로 theta 만큼 돌린 회전"""
+    return _mm(_axis_rot((0.0, -MOLD_SIGN, 0.0), theta), R_at_far)
+
+
+def handle_rot(beta, R_start, mi=0):
+    """손잡이 축(틀 방향)으로 beta 만큼 돌린 회전. 돌리는 동안 그리퍼 몸통이 위로 지나가는 방향"""
+    vy = R_start[1][2]
+    return _mm(_axis_rot((-1.0 if vy > 0 else 1.0, 0.0, 0.0), beta), R_start)
+
+
+# ================= 뒤집기 (2026-11-11 사용자 순서) =================
+# 겹친 갈색 손잡이 잡기 → +FLIP_LIFT → x축(손잡이 길이 방향)으로 180° (공중) → 로봇 쪽 FLIP_SLIDE → -FLIP_LIFT
+# → BAKE_SEC_SIDE2초 → 바닥에서 x축으로 180° 되돌리기 (들지 않고 모서리가 받침대에 안 닿을 만큼만
+# 손잡이가 반원으로 오르내림) → 같은 방법으로 한 번 더 180° → 로봇 쪽 FLIP_SLIDE → (뚜껑 열기)
+FLIP_LIFT = 200.0             # ★ 공중 뒤집기 전 드는 높이 (+20cm)
+FLIP_SLIDE = 50.0             # ★ 로봇 쪽으로 옮기는 거리 (5cm, 2번 → 경첩이 10cm 가까워짐)
+FLIP_TOTAL_SLIDE = 2 * FLIP_SLIDE
+FLIP_SLIDE_UP = 10.0          # ★ 바닥에서 옮길 때 끌리지 않게 살짝 드는 높이
+FLIP_STEP_DEG = 15.0          # ★ 돌릴 때 경유점 간격
+ROLL_HALF_W = GRILL_SHORT / 2                                           # 틀 반폭 (손잡이 축 → 옆 모서리)
+ROLL_HALF_H = (MOLD_GRIP[2] + STACK_T / 2) - (TABLE_TOP_Z + MOLD_FLOAT)  # 손잡이 축 → 틀 바닥
+ROLL_MARGIN = 10.0            # ★ 굴릴 때 모서리와 받침대 사이 여유
+
+
+def roll_bump(beta):
+    """바닥에서 손잡이 축으로 beta 돌렸을 때 모서리가 받침대에 안 닿도록 손잡이를 올리는 높이 (반원 모양)"""
+    b = math.radians(beta)
+    return (ROLL_HALF_W * abs(math.sin(b)) + ROLL_HALF_H * abs(math.cos(b)) - ROLL_HALF_H
+            + ROLL_MARGIN * abs(math.sin(b)))
+
+
+def toward_robot(tcp, dist):
+    """잡는 점을 틀 방향(x)으로 로봇 쪽으로 dist만큼"""
+    return [tcp[0] - MOLD_SIGN * dist, tcp[1], tcp[2]]
+
+
+def flip_pose(beta, slide=0.0, dz=0.0, mi=0):
+    """겹친 손잡이를 옆에서 잡은 채 손잡이 축(x)으로 beta 돌린 자세. slide = 로봇 쪽으로 옮긴 거리, dz = 든 높이"""
+    t = toward_robot(stack_tcp(0.0, mi), slide)
+    t[2] += dz
+    return pose_with(t, handle_rot(beta, stack_rot(mi), mi))
+
+
+# ================= 돌림판: 경첩 봉을 잡고 틀을 수평으로 90° 돌린 뒤, 겹친 손잡이를 끝에서 잡아 뒤집기 =================
+ROD_R = 110.0            # ★ 돌림판 중심 → 경첩 봉 끝 잡는 점 (철판 반폭 9cm + 2cm)
+ROD_SIDE = -1.0          # ★ 잡는 봉 끝: -1 = 좁은 쪽(커넥터 쪽), +1 = 넓은 쪽
+ROD_DIA = 10.0           # ★ 봉 지름 (그림용)
+
+
+def _turn_center():
+    return (MOLD_SIGN * HINGE_FWD, SHORT_SIGN * MOLD_SHORT)
+
+
+def turn_deg():
+    """먼 쪽에 겹친 손잡이가 봉이 있던 쪽(좁은 쪽)으로 오도록 돌리는 각도"""
+    a = math.atan2(0.0, MOLD_SIGN)
+    b = math.atan2(ROD_SIDE * SHORT_SIGN, 0.0)
+    d = math.degrees(b - a)
+    return (d + 180.0) % 360.0 - 180.0
+
+
+def _rot2(v, deg):
+    t = math.radians(deg); c, s_ = math.cos(t), math.sin(t)
+    return (v[0] * c - v[1] * s_, v[0] * s_ + v[1] * c)
+
+
+def _end_on(tcp, inward):
+    """끝에서(축 방향으로) 잡는 자세: 그리퍼가 inward 방향(수평)을 보고 손가락은 위아래로 닫힘"""
+    a = math.degrees(math.atan2(inward[1], inward[0]))
+    return pose_with(tcp, _zyz_mat(a, 90.0, 90.0))
+
+
+def rod_pose(t):
+    """돌림판을 t도 돌렸을 때 경첩 봉 끝을 '위에서' 잡은 자세 (손가락이 봉을 가로질러 닫힘)"""
+    cx, cy = _turn_center()
+    d = _rot2((0.0, ROD_SIDE * SHORT_SIGN), t)
+    tcp = [cx + d[0] * ROD_R, cy + d[1] * ROD_R, HINGE_Z]
+    yaw = math.degrees(math.atan2(d[1], d[0]))
+    return pose_with(tcp, _zyz_mat(0.0, 180.0, -yaw))
+
+
+def turned_stack_pose(lift=0.0, z_extra=0.0):
+    """돌린 뒤: 겹친 손잡이를 '끝에서' 잡은 자세"""
+    cx, cy = _turn_center()
+    d = _rot2((MOLD_SIGN, 0.0), turn_deg())
+    tcp = [cx + d[0] * LID_GRIP_R, cy + d[1] * LID_GRIP_R, MOLD_GRIP[2] + STACK_T / 2 + lift + z_extra]
+    return _end_on(tcp, (-d[0], -d[1]))
+
+
+def turned_open_tcp(theta, z_extra=0.0):
+    """돌린 뒤 펼치기: 위 손잡이 잡는 점이 경첩을 돌아 반대편으로 (0 → 180)"""
+    cx, cy = _turn_center()
+    d = _rot2((MOLD_SIGN, 0.0), turn_deg())
+    th = math.radians(theta)
+    return [cx + d[0] * LID_GRIP_R * math.cos(th), cy + d[1] * LID_GRIP_R * math.cos(th),
+            MOLD_GRIP[2] + LID_GRIP_R * math.sin(th) + z_extra]
+
+
+def turned_hinge_rot(theta, R_start):
+    """돌린 뒤의 경첩 축으로 theta 돌린 회전 — 손잡이가 먼저 위로 들리는 방향"""
+    d = _rot2((MOLD_SIGN, 0.0), turn_deg())
+    k = (d[1], -d[0], 0.0)
+    return _mm(_axis_rot(k, theta), R_start)
 
 
 def pour_z():

@@ -101,7 +101,65 @@ class GripperViz(Node):
         s = math.sin(math.pi / 4)     # 90° 회전
         return (ax / n * s, ay / n * s, 0.0, math.cos(math.pi / 4))
 
+    # ---- 틀(뚜껑·전체)을 잡고 돌리면 RViz 그림도 같이 움직이고, 놓은 자리에 그대로 남게 ----
+    LID_FAR = {71, 73, 25, 27, 33, 35, 91, 93}
+    LID_NEAR = {70, 72, 24, 26, 32, 34, 90, 92}
+    MOLD_ALL = LID_FAR | LID_NEAR | {29}
+
+    def _T(self, f):
+        R = self._rot_zyz(*f[3:6])
+        return R, [f[0] / 1000, f[1] / 1000, f[2] / 1000]
+
+    @staticmethod
+    def _compose(A, B):
+        Ra, ta = A; Rb, tb = B
+        R = [[sum(Ra[i][k] * Rb[k][j] for k in range(3)) for j in range(3)] for i in range(3)]
+        t = [sum(Ra[i][k] * tb[k] for k in range(3)) + ta[i] for i in range(3)]
+        return R, t
+
+    @staticmethod
+    def _inv(A):
+        R, t = A
+        Rt = [[R[j][i] for j in range(3)] for i in range(3)]
+        return Rt, [-sum(Rt[i][k] * t[k] for k in range(3)) for i in range(3)]
+
+    def _apply(self, m, T):
+        R, t = T
+        p = m.pose.position
+        q = [sum(R[i][k] * v for k, v in enumerate((p.x, p.y, p.z))) + t[i] for i in range(3)]
+        o = m.pose.orientation
+        M = self._quat_to_mat((o.x, o.y, o.z, o.w))
+        M2 = [[sum(R[i][k] * M[k][j] for k in range(3)) for j in range(3)] for i in range(3)]
+        m.pose.position.x, m.pose.position.y, m.pose.position.z = q
+        m.pose.orientation.x, m.pose.orientation.y, m.pose.orientation.z, m.pose.orientation.w = self._mat_to_quat(M2)
+
+    def _mold_track(self, data):
+        name, _, fl = data.partition("|")
+        fl = [float(x) for x in fl.split(",")] if fl else None
+        if not hasattr(self, "mold_T"):
+            self.mold_T, self.mold_grab = {}, None
+        if name == "reset":
+            self.mold_T, self.mold_grab = {}, None
+            return True
+        groups = {"lid": self.LID_FAR, "top": self.LID_NEAR, "mold": self.MOLD_ALL | {75}, "near": self.LID_NEAR, "far": self.LID_FAR, "turn": self.MOLD_ALL | {74, 75}}
+        if name in groups and fl:
+            self.mold_grab = (groups[name], fl)
+            return True
+        if name == "" and self.mold_grab is not None:
+            ids, fg = self.mold_grab
+            if fl:
+                rel = self._compose(self._T(fl), self._inv(self._T(fg)))
+                for i in ids:
+                    self.mold_T[i] = self._compose(rel, self.mold_T.get(i, ([[1, 0, 0], [0, 1, 0], [0, 0, 1]], [0, 0, 0])))
+            self.mold_grab = None
+            return True
+        return False
+
     def on_held(self, msg):
+        if self._mold_track(msg.data):
+            self.held, self.held_flange = "", None
+            self.publish_scene()
+            return
         name, _, fl = msg.data.partition("|")
         if name.startswith("cup:"):                 # 붕어빵이 손님 컵에 들어감 (꼬챙이는 계속 들고 있음)
             self.cup_fish = True
@@ -325,6 +383,36 @@ class GripperViz(Node):
                                W.CUP_TOP_Z - W.PAPER_CUP_H + W.CUP_FISH_GAP + W.FISH_L / 2,
                                W.FISH_W, 20, W.FISH_L, fishc))
 
+        # 틀마다 손잡이 2개 (가까운 판 → 로봇 쪽, 먼 판 → 바깥쪽). 철판 가운데 손잡이·끈 고리는 지움
+        arr.markers = [m for m in arr.markers if not (m.ns == "scene" and m.id in (22, 23, 28))]
+        zd = W.tool_dir(W.MOLD_GRIP)
+        hl = (W.HANDLE_L, W.HANDLE_W) if abs(zd[0]) > 0.5 else (W.HANDLE_W, W.HANDLE_L)
+        for mi, hs_ in enumerate(W.HANDLE_SHORTS):
+            ti = W.tool_tip(W.pose_to(W.MOLD_FWD, hs_, W.TABLE_TOP_Z + W.MOLD_FLOAT))
+            e0 = [ti[k] + zd[k] * W.HANDLE_STICK for k in range(3)]
+            e1 = [e0[k] + zd[k] * 2 * W.MOLD_W for k in range(3)]
+            for k2, (e, sg) in enumerate(((e0, -1), (e1, +1))):
+                c = [e[k] + sg * zd[k] * W.HANDLE_L / 2 for k in range(3)]
+                arr.markers.append(self._box(90 + mi * 2 + k2, c[0], c[1], ti[2], hl[0], hl[1],
+                                   W.HANDLE_T, (0.75, 0.55, 0.3, 0.95)))
+        # 경첩 원기둥 봉 삭제: 경첩 줄 위에 있는 원기둥 마커는 그리지 않음
+        hx = W.MOLD_SIGN * W.HINGE_FWD / 1000.0
+        arr.markers = [m for m in arr.markers
+                       if not (m.type == Marker.CYLINDER and m.header.frame_id == "base_link" and m.id != 75
+                               and abs(m.pose.position.x - hx) < 0.04
+                               and abs(m.pose.position.z * 1000 - (W.TABLE_TOP_Z + W.MOLD_FLOAT)) < 80)]
+        # 경첩 봉 (돌림판 돌리는 용도): 짧은 방향으로, 끝이 철판 밖으로 나옴
+        cx_, cy_ = W.MOLD_SIGN * W.HINGE_FWD, W.SHORT_SIGN * W.MOLD_SHORT
+        q_ = self._quat_z_to((0.0, 1.0, 0.0))
+        arr.markers.append(self._cyl(75, cx_, cy_, W.HINGE_Z, W.ROD_DIA, 2 * W.ROD_R + 20, (0.6, 0.6, 0.62, 1.0), quat=q_))
+        mT = getattr(self, "mold_T", {}); mg = getattr(self, "mold_grab", None)
+        for m in arr.markers:
+            if m.ns != "scene" or m.header.frame_id != "base_link":
+                continue
+            if m.id in mT:
+                self._apply(m, mT[m.id])
+            if mg and m.id in mg[0]:
+                self._attach(m, mg[1])
         ids, flange = self._held_group()
         if flange is not None and self.held_flange:
             flange = self.held_flange
